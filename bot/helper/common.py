@@ -13,6 +13,7 @@ from pyrogram.enums import ChatAction
 from .. import (
     DOWNLOAD_DIR,
     LOGGER,
+    cpu_no,
     cpu_eater_lock,
     excluded_extensions,
     intervals,
@@ -21,8 +22,6 @@ from .. import (
     task_dict_lock,
     user_data,
 )
-threads = max(1, cpu_no // 2)
-cores = ",".join(str(i) for i in range(threads))
 
 from ..core.config_manager import Config, BinConfig
 from ..core.tg_client import TgClient
@@ -60,7 +59,8 @@ from .telegram_helper.message_utils import (
     send_message,
     send_status_message,
 )
-
+threads = max(1, cpu_no // 2)
+cores = ",".join(str(i) for i in range(threads))
 
 class TaskConfig:
     def __init__(self):
