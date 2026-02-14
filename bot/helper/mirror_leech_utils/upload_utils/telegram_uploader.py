@@ -40,7 +40,7 @@ from ...ext_utils.media_utils import (
     get_audio_thumbnail,
     get_document_type,
     get_media_info,
-    create_grid_thumbnail,
+    get_multiple_frames_thumbnail,
     get_video_thumbnail,
     get_md5_hash,
 )
@@ -462,7 +462,7 @@ class TelegramUploader:
                 if is_video and thumb is None:
                     # MODIFIED: Grid thumbnail logic for documents
                     if self._use_grid_thumb:
-                        thumb = await create_grid_thumbnail(
+                        thumb = await get_multiple_frames_thumbnail(
                             self._up_path,
                             self._grid_layout,
                             False  # keep_screenshots
@@ -491,14 +491,14 @@ class TelegramUploader:
                 if thumb is None:
                     if self._use_grid_thumb:
                         # Use grid thumbnail (multiple frames)
-                        thumb = await create_grid_thumbnail(
+                        thumb = await get_multiple_frames_thumbnail(
                             self._up_path,
                             self._grid_layout,
                             False  # keep_screenshots
                         )
                     elif self._listener.thumbnail_layout:
                         # Use listener's layout if specified
-                        thumb = await create_grid_thumbnail(
+                        thumb = await get_multiple_frames_thumbnail(
                             self._up_path,
                             self._listener.thumbnail_layout,
                             self._listener.screen_shots,
