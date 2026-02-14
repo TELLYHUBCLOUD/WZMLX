@@ -1,4 +1,5 @@
 import re
+import asyncio  # FIXED: Added missing import
 from contextlib import suppress
 from PIL import Image, ImageDraw
 from hashlib import md5
@@ -346,39 +347,37 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots, co
         return None
     
     try:
-        # SAFELY list PNG files WITHOUT glob (avoids issues with [ ] in paths)
+        # SAFELY list PNG files WITHOUT glob (avoids issues with [ ] and other special chars in paths)
+        screenshot_files = []
         try:
+            # Try async listing first
             all_files = await listdir(dirpath)
             screenshot_files = [
                 ospath.join(dirpath, f) for f in all_files 
                 if f.lower().endswith('.png') and f.startswith('SS.')
             ]
-            screenshot_files.sort()  # Ensure consistent ordering
-            
-            if not screenshot_files:
-                # Fallback to os-level listing if aiofiles.listdir fails
+        except Exception as e:
+            LOGGER.debug(f"Async listdir failed for {dirpath}, falling back to sync: {e}")
+            # Fallback to sync listing
+            try:
                 all_files = os_listdir(dirpath)
                 screenshot_files = [
                     ospath.join(dirpath, f) for f in all_files 
                     if f.lower().endswith('.png') and f.startswith('SS.')
                 ]
-                screenshot_files.sort()
-        except Exception as e:
-            LOGGER.warning(f"Error listing directory {dirpath}: {e}")
-            all_files = os_listdir(dirpath)
-            screenshot_files = [
-                ospath.join(dirpath, f) for f in all_files 
-                if f.lower().endswith('.png') and f.startswith('SS.')
-            ]
-            screenshot_files.sort()
+            except Exception as e2:
+                LOGGER.error(f"Failed to list directory {dirpath}: {e2}")
+                return None
+        
+        screenshot_files.sort()  # Ensure consistent ordering
         
         if not screenshot_files:
-            LOGGER.error(f"No screenshots found in {dirpath}. Files present: {os_listdir(dirpath)}")
+            LOGGER.error(f"No screenshots found in {dirpath}. Directory contents: {os_listdir(dirpath)}")
             return None
         
-        LOGGER.debug(f"Found {len(screenshot_files)} screenshots in {dirpath}")
+        LOGGER.debug(f"Processing {len(screenshot_files)} screenshots with rounded corners (radius={corner_radius})")
         
-        # Add rounded corners to all screenshots
+        # Add rounded corners to all screenshots BEFORE tiling
         await _add_rounded_corners_to_images(screenshot_files, corner_radius)
         
         # Create tiled thumbnail with FFmpeg
@@ -397,7 +396,7 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots, co
             "-pattern_type",
             "glob",
             "-i",
-            f"{escape(dirpath)}/*.png",  # FFmpeg's glob handles special chars better
+            f"{escape(dirpath)}/*.png",  # FFmpeg handles glob internally (safer than Python glob)
             "-vf",
             f"tile={layout}",
             "-q:v",
@@ -428,12 +427,15 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots, co
     
     finally:
         if not keep_screenshots:
-            await rmtree(dirpath, ignore_errors=True)
+            try:
+                await rmtree(dirpath, ignore_errors=True)
+            except Exception as e:
+                LOGGER.warning(f"Failed to cleanup screenshots directory {dirpath}: {e}")
 
 
 async def _add_rounded_corners_to_images(image_paths, radius):
     """Process multiple images with rounded corners using thread pool for CPU-bound PIL ops."""
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_running_loop()  # NOW WORKS: asyncio module is imported
     with ThreadPoolExecutor(max_workers=threads) as executor:
         await asyncio.gather(*[
             loop.run_in_executor(None, _process_single_image, path, radius)
