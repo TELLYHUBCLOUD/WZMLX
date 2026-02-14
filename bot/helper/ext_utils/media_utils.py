@@ -386,6 +386,115 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots):
     return output
 
 
+async def create_grid_thumbnail(
+    image_paths,
+    output_path=None,
+    grid_cols=2,
+    grid_rows=3,
+    thumbnail_size=(400, 600),
+    spacing=15,
+    bg_color=(0, 0, 0),
+    corner_radius=40,
+):
+    """
+    Create a grid thumbnail from multiple images with rounded corners.
+    
+    Args:
+        image_paths: List of image file paths
+        output_path: Output file path (auto-generated if None)
+        grid_cols: Number of columns in grid
+        grid_rows: Number of rows in grid
+        thumbnail_size: Size of each thumbnail (width, height)
+        spacing: Space between thumbnails in pixels
+        bg_color: Background color (R, G, B)
+        corner_radius: Radius for rounded corners
+        
+    Returns:
+        Path to created thumbnail or None if failed
+    """
+    try:
+        # Generate output path if not provided
+        if not output_path:
+            output_dir = f"{DOWNLOAD_DIR}thumbnails"
+            await makedirs(output_dir, exist_ok=True)
+            output_path = ospath.join(output_dir, f"grid_{time()}.jpg")
+        
+        # Calculate canvas size
+        canvas_width = (thumbnail_size[0] * grid_cols) + (spacing * (grid_cols + 1))
+        canvas_height = (thumbnail_size[1] * grid_rows) + (spacing * (grid_rows + 1))
+        
+        # Create canvas
+        canvas = Image.new('RGB', (canvas_width, canvas_height), bg_color)
+        
+        # Process each image
+        max_images = grid_cols * grid_rows
+        for idx, img_path in enumerate(image_paths[:max_images]):
+            if not await aiopath.exists(img_path):
+                LOGGER.warning(f"Image not found: {img_path}")
+                continue
+            
+            try:
+                # Calculate position
+                col = idx % grid_cols
+                row = idx // grid_cols
+                x = spacing + (col * (thumbnail_size[0] + spacing))
+                y = spacing + (row * (thumbnail_size[1] + spacing))
+                
+                # Load and resize image
+                img = await sync_to_async(Image.open, img_path)
+                img = await sync_to_async(
+                    img.resize, thumbnail_size, Image.Resampling.LANCZOS
+                )
+                
+                # Convert to RGB if needed
+                if img.mode != 'RGB':
+                    img = await sync_to_async(img.convert, 'RGB')
+                
+                # Apply rounded corners
+                img_with_corners = await sync_to_async(
+                    _add_rounded_corners, img, corner_radius
+                )
+                
+                # Paste on canvas
+                await sync_to_async(
+                    canvas.paste, img_with_corners, (x, y), img_with_corners
+                )
+                
+            except Exception as e:
+                LOGGER.error(f"Error processing image {img_path}: {e}")
+                continue
+        
+        # Save final image
+        await sync_to_async(canvas.save, output_path, 'JPEG', quality=95)
+        
+        if await aiopath.exists(output_path):
+            return output_path
+        else:
+            LOGGER.error(f"Failed to create grid thumbnail at: {output_path}")
+            return None
+            
+    except Exception as e:
+        LOGGER.error(f"Error creating grid thumbnail: {e}")
+        return None
+
+
+def _add_rounded_corners(image, radius):
+    """Helper function to add rounded corners to an image."""
+    from PIL import ImageDraw
+    
+    # Create mask for rounded corners
+    mask = Image.new('L', image.size, 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle([(0, 0), image.size], radius=radius, fill=255)
+    
+    # Create output with alpha channel
+    output = Image.new('RGBA', image.size, (0, 0, 0, 0))
+    output.paste(image, (0, 0))
+    output.putalpha(mask)
+    
+    return output
+
+
 class FFMpeg:
     def __init__(self, listener):
         self._listener = listener
