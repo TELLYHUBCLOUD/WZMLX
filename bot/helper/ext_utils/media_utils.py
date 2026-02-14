@@ -336,21 +336,16 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots, co
     if len(ss_dims) != 2 or not ss_dims[0].isdigit() or not ss_dims[1].isdigit():
         LOGGER.error(f"Invalid layout value: {layout}")
         return None
-    
     ss_nb = int(ss_dims[0]) * int(ss_dims[1])
     if ss_nb == 0:
         LOGGER.error(f"Invalid layout value: {layout}")
         return None
-    
     dirpath = await take_ss(video_file, ss_nb)
     if not dirpath:
         return None
-    
     try:
-        # SAFELY list PNG files WITHOUT glob (avoids issues with [ ] and other special chars in paths)
         screenshot_files = []
         try:
-            # Try async listing first
             all_files = await listdir(dirpath)
             screenshot_files = [
                 ospath.join(dirpath, f) for f in all_files 
@@ -358,7 +353,6 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots, co
             ]
         except Exception as e:
             LOGGER.debug(f"Async listdir failed for {dirpath}, falling back to sync: {e}")
-            # Fallback to sync listing
             try:
                 all_files = os_listdir(dirpath)
                 screenshot_files = [
@@ -368,23 +362,17 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots, co
             except Exception as e2:
                 LOGGER.error(f"Failed to list directory {dirpath}: {e2}")
                 return None
-        
         screenshot_files.sort()  # Ensure consistent ordering
-        
         if not screenshot_files:
             LOGGER.error(f"No screenshots found in {dirpath}. Directory contents: {os_listdir(dirpath)}")
             return None
-        
         LOGGER.debug(f"Processing {len(screenshot_files)} screenshots with rounded corners (radius={corner_radius})")
         
         # Add rounded corners to all screenshots BEFORE tiling
-        await _add_rounded_corners_to_images(screenshot_files, corner_radius)
-        
-        # Create tiled thumbnail with FFmpeg
+        await _add_rounded_corners_to_images(screenshot_files, corner_radius, target_size=(300, 300))
         output_dir = f"{DOWNLOAD_DIR}thumbnails"
         await makedirs(output_dir, exist_ok=True)
         output = ospath.join(output_dir, f"{time()}.jpg")
-        
         cmd = [
             "taskset",
             "-c",
@@ -433,52 +421,45 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots, co
                 LOGGER.warning(f"Failed to cleanup screenshots directory {dirpath}: {e}")
 
 
-async def _add_rounded_corners_to_images(image_paths, radius):
-    """Process multiple images with white background + rounded corners."""
+async def _add_rounded_corners_to_images(image_paths, radius=20, target_size=(300, 300)):
+    """Process each screenshot: resize → white pad → rounded corners → save as RGB PNG."""
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=threads) as executor:
         await asyncio.gather(*[
-            loop.run_in_executor(None, _process_single_image_with_white_bg, path, radius)
+            loop.run_in_executor(None, _process_single_image_rounded_white, path, radius, target_size)
             for path in image_paths
         ])
 
 
-def _process_single_image_with_white_bg(image_path, radius):
-    """Add white background + rounded corners (output RGB, no alpha)."""
+def _process_single_image_rounded_white(image_path, radius, target_size):
+    """Resize, add white padding, apply rounded corners, save as RGB PNG."""
     try:
         with Image.open(image_path) as img:
-            # Ensure RGB (remove alpha if present)
             if img.mode in ("RGBA", "LA"):
-                # Create white background and paste image on it
                 bg = Image.new("RGB", img.size, (255, 255, 255))
                 if img.mode == "RGBA":
-                    bg.paste(img, mask=img.split()[-1])  # Use alpha as mask
-                else:  # "LA"
+                    bg.paste(img, mask=img.split()[-1])
+                else:
                     bg.paste(img, mask=img.split()[-1])
                 img = bg
             elif img.mode != "RGB":
                 img = img.convert("RGB")
-
-            # Adjust radius for small images
-            safe_radius = min(radius, img.width // 4, img.height // 4)
+            img.thumbnail(target_size, Image.Resampling.LANCZOS)
+            canvas = Image.new("RGB", target_size, (255, 255, 255))
+            x = (target_size[0] - img.width) // 2
+            y = (target_size[1] - img.height) // 2
+            canvas.paste(img, (x, y))
+            safe_radius = min(radius, canvas.width // 4, canvas.height // 4)
             if safe_radius < 2:
                 safe_radius = 2
-
-            # Create rounded mask
-            mask = Image.new("L", img.size, 0)
+            mask = Image.new("L", canvas.size, 0)
             draw = ImageDraw.Draw(mask)
-            draw.rounded_rectangle([(0, 0), img.size], radius=safe_radius, fill=255)
-
-            # Apply mask → creates soft edge (but we keep RGB only)
-            # To avoid transparency, we composite onto white again
-            output = Image.new("RGB", img.size, (255, 255, 255))
-            output.paste(img, mask=mask)
-
-            # Save as PNG (lossless) — FFmpeg will convert to JPEG later
+            draw.rounded_rectangle([(0, 0), canvas.size], radius=safe_radius, fill=255)
+            output = Image.new("RGB", canvas.size, (255, 255, 255))
+            output.paste(canvas, mask=mask)
             output.save(image_path, "PNG", optimize=True)
     except Exception as e:
-        LOGGER.warning(f"Failed to process {image_path} for white-bg rounded corners: {e}")
-
+        LOGGER.warning(f"Failed to round corners for {image_path}: {e}")
 
 class FFMpeg:
     def __init__(self, listener):
