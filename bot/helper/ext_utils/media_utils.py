@@ -369,7 +369,7 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots, co
         LOGGER.debug(f"Processing {len(screenshot_files)} screenshots with rounded corners (radius={corner_radius})")
         
         # Add rounded corners to all screenshots BEFORE tiling
-        await _add_rounded_corners_to_images(screenshot_files, corner_radius, target_size=(300, 300))
+        await _add_rounded_corners_to_images(screenshot_files, corner_radius)
         output_dir = f"{DOWNLOAD_DIR}thumbnails"
         await makedirs(output_dir, exist_ok=True)
         output = ospath.join(output_dir, f"{time()}.jpg")
@@ -421,46 +421,40 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots, co
                 LOGGER.warning(f"Failed to cleanup screenshots directory {dirpath}: {e}")
 
 
-async def _add_rounded_corners_to_images(image_paths, radius=20, target_size=(300, 300)):
-    """Process each screenshot: resize → white pad → rounded corners → save as RGB PNG."""
+async def _add_rounded_corners_to_images(image_paths, radius):
+    """Process multiple images with white background + rounded corners."""
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=threads) as executor:
         await asyncio.gather(*[
-            loop.run_in_executor(None, _process_single_image_rounded_white, path, radius, target_size)
+            loop.run_in_executor(None, _process_single_image_with_white_bg, path, radius)
             for path in image_paths
         ])
 
 
-def _process_single_image_rounded_white(image_path, radius, target_size):
-    """Resize, add white padding, apply rounded corners, save as RGB PNG."""
+def _process_single_image_with_white_bg(image_path, radius):
+    """Add white background + rounded corners (output RGB, no alpha)."""
     try:
         with Image.open(image_path) as img:
             if img.mode in ("RGBA", "LA"):
                 bg = Image.new("RGB", img.size, (255, 255, 255))
                 if img.mode == "RGBA":
-                    bg.paste(img, mask=img.split()[-1])
-                else:
+                    bg.paste(img, mask=img.split()[-1])  # Use alpha as mask
+                else:  # "LA"
                     bg.paste(img, mask=img.split()[-1])
                 img = bg
             elif img.mode != "RGB":
                 img = img.convert("RGB")
-            img.thumbnail(target_size, Image.Resampling.LANCZOS)
-            canvas = Image.new("RGB", target_size, (255, 255, 255))
-            x = (target_size[0] - img.width) // 2
-            y = (target_size[1] - img.height) // 2
-            canvas.paste(img, (x, y))
-            safe_radius = min(radius, canvas.width // 4, canvas.height // 4)
+            safe_radius = min(radius, img.width // 4, img.height // 4)
             if safe_radius < 2:
                 safe_radius = 2
-            mask = Image.new("L", canvas.size, 0)
+            mask = Image.new("L", img.size, 0)
             draw = ImageDraw.Draw(mask)
-            draw.rounded_rectangle([(0, 0), canvas.size], radius=safe_radius, fill=255)
-            output = Image.new("RGB", canvas.size, (255, 255, 255))
-            output.paste(canvas, mask=mask)
+            draw.rounded_rectangle([(0, 0), img.size], radius=safe_radius, fill=255)
+            output = Image.new("RGB", img.size, (255, 255, 255))
+            output.paste(img, mask=mask)
             output.save(image_path, "PNG", optimize=True)
     except Exception as e:
-        LOGGER.warning(f"Failed to round corners for {image_path}: {e}")
-
+        LOGGER.warning(f"Failed to process {image_path} for white-bg rounded corners: {e}")
 class FFMpeg:
     def __init__(self, listener):
         self._listener = listener
