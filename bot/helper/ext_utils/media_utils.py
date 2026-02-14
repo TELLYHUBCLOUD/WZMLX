@@ -1,6 +1,6 @@
 import re
 from contextlib import suppress
-from PIL import Image
+from PIL import Image, ImageDraw
 from hashlib import md5
 from aiofiles.os import remove, path as aiopath, makedirs
 import json
@@ -16,6 +16,8 @@ from re import search as re_search, escape
 from time import time
 from aioshutil import rmtree
 from langcodes import Language
+import glob
+from concurrent.futures import ThreadPoolExecutor
 
 from ... import LOGGER, cpu_no, DOWNLOAD_DIR
 from ...core.config_manager import BinConfig
@@ -156,16 +158,6 @@ async def get_document_type(path):
 
 
 async def get_streams(file):
-    """
-    Gets media stream information using ffprobe.
-
-    Args:
-        file: Path to the media file.
-
-    Returns:
-        A list of stream objects (dictionaries) or None if an error occurs
-        or no streams are found.
-    """
     cmd = [
         "ffprobe",
         "-hide_banner",
@@ -328,171 +320,97 @@ async def get_video_thumbnail(video_file, duration):
     return output
 
 
-async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots):
+async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots, corner_radius=20):
     layout = re.sub(r"(\d+)\D+(\d+)", r"\1x\2", layout)
-    ss_nb = layout.split("x")
-    if len(ss_nb) != 2 or not ss_nb[0].isdigit() or not ss_nb[1].isdigit():
+    ss_dims = layout.split("x")
+    if len(ss_dims) != 2 or not ss_dims[0].isdigit() or not ss_dims[1].isdigit():
         LOGGER.error(f"Invalid layout value: {layout}")
         return None
-    ss_nb = int(ss_nb[0]) * int(ss_nb[1])
+    
+    ss_nb = int(ss_dims[0]) * int(ss_dims[1])
     if ss_nb == 0:
         LOGGER.error(f"Invalid layout value: {layout}")
-        return None
     dirpath = await take_ss(video_file, ss_nb)
     if not dirpath:
         return None
-    output_dir = f"{DOWNLOAD_DIR}thumbnails"
-    await makedirs(output_dir, exist_ok=True)
-    output = ospath.join(output_dir, f"{time()}.jpg")
-    cmd = [
-        "taskset",
-        "-c",
-        f"{cores}",
-        BinConfig.FFMPEG_NAME,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-pattern_type",
-        "glob",
-        "-i",
-        f"{escape(dirpath)}/*.png",
-        "-vf",
-        f"tile={layout}, thumbnail",
-        "-q:v",
-        "1",
-        "-frames:v",
-        "1",
-        "-f",
-        "mjpeg",
-        "-threads",
-        f"{threads}",
-        output,
-    ]
     try:
-        _, err, code = await wait_for(cmd_exec(cmd), timeout=60)
-        if code != 0 or not await aiopath.exists(output):
+        screenshot_files = sorted(glob.glob(ospath.join(dirpath, "*.png")))
+        if not screenshot_files:
+            LOGGER.error(f"No screenshots found in {dirpath}")
+            return None
+        await _add_rounded_corners_to_images(screenshot_files, corner_radius)
+        output_dir = f"{DOWNLOAD_DIR}thumbnails"
+        await makedirs(output_dir, exist_ok=True)
+        output = ospath.join(output_dir, f"{time()}.jpg")
+        
+        cmd = [
+            "taskset",
+            "-c",
+            f"{cores}",
+            BinConfig.FFMPEG_NAME,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-pattern_type",
+            "glob",
+            "-i",
+            f"{escape(dirpath)}/*.png",
+            "-vf",
+            f"tile={layout}",
+            "-q:v",
+            "1",
+            "-frames:v",
+            "1",
+            "-f",
+            "mjpeg",
+            "-threads",
+            f"{threads}",
+            output,
+        ]
+        
+        try:
+            _, err, code = await wait_for(cmd_exec(cmd), timeout=60)
+            if code != 0 or not await aiopath.exists(output):
+                LOGGER.error(
+                    f"Error while combining thumbnails for video. Name: {video_file} stderr: {err}"
+                )
+                return None
+        except Exception:
             LOGGER.error(
-                f"Error while combining thumbnails for video. Name: {video_file} stderr: {err}"
+                f"Error while combining thumbnails from video. Name: {video_file}. Error: Timeout some issues with ffmpeg with specific arch!"
             )
             return None
-    except Exception:
-        LOGGER.error(
-            f"Error while combining thumbnails from video. Name: {video_file}. Error: Timeout some issues with ffmpeg with specific arch!"
-        )
-        return None
+        
+        return output
+    
     finally:
         if not keep_screenshots:
             await rmtree(dirpath, ignore_errors=True)
-    return output
 
 
-async def create_grid_thumbnail(
-    image_paths,
-    output_path=None,
-    grid_cols=2,
-    grid_rows=3,
-    thumbnail_size=(400, 600),
-    spacing=15,
-    bg_color=(0, 0, 0),
-    corner_radius=40,
-):
-    """
-    Create a grid thumbnail from multiple images with rounded corners.
-    
-    Args:
-        image_paths: List of image file paths
-        output_path: Output file path (auto-generated if None)
-        grid_cols: Number of columns in grid
-        grid_rows: Number of rows in grid
-        thumbnail_size: Size of each thumbnail (width, height)
-        spacing: Space between thumbnails in pixels
-        bg_color: Background color (R, G, B)
-        corner_radius: Radius for rounded corners
-        
-    Returns:
-        Path to created thumbnail or None if failed
-    """
+async def _add_rounded_corners_to_images(image_paths, radius):
+    """Process multiple images with rounded corners using thread pool for CPU-bound PIL ops."""
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor() as executor:
+        await asyncio.gather(*[
+            loop.run_in_executor(None, _process_single_image, path, radius)
+            for path in image_paths
+        ])
+
+
+def _process_single_image(image_path, radius):
+    """Synchronous helper to add rounded corners to a single image."""
     try:
-        # Generate output path if not provided
-        if not output_path:
-            output_dir = f"{DOWNLOAD_DIR}thumbnails"
-            await makedirs(output_dir, exist_ok=True)
-            output_path = ospath.join(output_dir, f"grid_{time()}.jpg")
-        
-        # Calculate canvas size
-        canvas_width = (thumbnail_size[0] * grid_cols) + (spacing * (grid_cols + 1))
-        canvas_height = (thumbnail_size[1] * grid_rows) + (spacing * (grid_rows + 1))
-        
-        # Create canvas
-        canvas = Image.new('RGB', (canvas_width, canvas_height), bg_color)
-        
-        # Process each image
-        max_images = grid_cols * grid_rows
-        for idx, img_path in enumerate(image_paths[:max_images]):
-            if not await aiopath.exists(img_path):
-                LOGGER.warning(f"Image not found: {img_path}")
-                continue
-            
-            try:
-                # Calculate position
-                col = idx % grid_cols
-                row = idx // grid_cols
-                x = spacing + (col * (thumbnail_size[0] + spacing))
-                y = spacing + (row * (thumbnail_size[1] + spacing))
-                
-                # Load and resize image
-                img = await sync_to_async(Image.open, img_path)
-                img = await sync_to_async(
-                    img.resize, thumbnail_size, Image.Resampling.LANCZOS
-                )
-                
-                # Convert to RGB if needed
-                if img.mode != 'RGB':
-                    img = await sync_to_async(img.convert, 'RGB')
-                
-                # Apply rounded corners
-                img_with_corners = await sync_to_async(
-                    _add_rounded_corners, img, corner_radius
-                )
-                
-                # Paste on canvas
-                await sync_to_async(
-                    canvas.paste, img_with_corners, (x, y), img_with_corners
-                )
-                
-            except Exception as e:
-                LOGGER.error(f"Error processing image {img_path}: {e}")
-                continue
-        
-        # Save final image
-        await sync_to_async(canvas.save, output_path, 'JPEG', quality=95)
-        
-        if await aiopath.exists(output_path):
-            return output_path
-        else:
-            LOGGER.error(f"Failed to create grid thumbnail at: {output_path}")
-            return None
-            
+        with Image.open(image_path) as img:
+            img = img.convert("RGBA")
+            safe_radius = min(radius, img.width // 4, img.height // 4)
+            mask = Image.new("L", img.size, 0)
+            draw = ImageDraw.Draw(mask)
+            draw.rounded_rectangle([(0, 0), img.size], radius=safe_radius, fill=255)
+            img.putalpha(mask)
+            img.save(image_path, "PNG", optimize=True)
     except Exception as e:
-        LOGGER.error(f"Error creating grid thumbnail: {e}")
-        return None
-
-
-def _add_rounded_corners(image, radius):
-    """Helper function to add rounded corners to an image."""
-    from PIL import ImageDraw
-    
-    # Create mask for rounded corners
-    mask = Image.new('L', image.size, 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle([(0, 0), image.size], radius=radius, fill=255)
-    
-    # Create output with alpha channel
-    output = Image.new('RGBA', image.size, (0, 0, 0, 0))
-    output.paste(image, (0, 0))
-    output.putalpha(mask)
-    
-    return output
+        LOGGER.warning(f"Failed to add rounded corners to {image_path}: {e}")
 
 
 class FFMpeg:
