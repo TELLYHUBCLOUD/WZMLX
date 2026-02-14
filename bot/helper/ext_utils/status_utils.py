@@ -188,14 +188,29 @@ def speed_string_to_bytes(size_text: str):
 
 def get_progress_bar_string(pct: str):
     try:
-        pct = float(str(pct).strip("%"))
+        pct_float = float(str(pct).strip("%"))
     except (ValueError, AttributeError):
-        pct = 0
-    p = min(max(pct, 0), 100)
-    cFull = int(p // 8.33)  # 12 blocks total
-    p_str = "⬣" * cFull
-    p_str += "⬡" * (12 - cFull)
-    return f"❨{p_str}❩"}]"
+        pct_float = 0.0
+    pct = max(0.0, min(100.0, pct_float))
+    total_blocks = 12
+    filled_blocks = int(pct / (100 / total_blocks))
+    remaining_ratio = (pct % (100 / total_blocks)) / (100 / total_blocks)
+    p_str = ""
+    p_str += "𒊹" * filled_blocks
+    if filled_blocks < total_blocks and remaining_ratio > 0:
+        if remaining_ratio <= 0.25:
+            p_str += "◔"
+        elif remaining_ratio <= 0.5:
+            p_str += "◑"
+        elif remaining_ratio <= 0.75:
+            p_str += "◕"
+        else: # remaining_ratio <= 1.0
+            p_str += "𒊹" # Treat as full if very close
+        filled_blocks += 1 
+    p_str += "❍" * (total_blocks - filled_blocks)
+
+    return f"[{p_str}]"
+
 
 
 async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=1):
