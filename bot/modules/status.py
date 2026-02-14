@@ -236,9 +236,13 @@ async def status_pages(_, query):
         seed_speed = 0
 
         async with task_dict_lock:
-            status_results = await gather(
-                *(get_download_status(download) for download in task_dict.values())
-            )
+            # Create a shallow copy of tasks under lock to release the lock quickly
+            # This prevents blocking other operations while waiting for slow status checks
+            current_tasks = list(task_dict.values())
+
+        status_results = await gather(
+            *(get_download_status(download) for download in current_tasks)
+        )
 
         eng_status = EngineStatus()
         if any(
